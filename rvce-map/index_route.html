@@ -1,0 +1,805 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>RVCE — Campus Map & Routing</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+
+<!-- MapLibre -->
+<link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+
+<style>
+/* ===== KEEPING YOUR UI / CSS ===== */
+:root{
+  --sidebar-w:340px;
+  --accent:#1e4db7;
+  --bg:#f6efe7;
+  --paper-tint:#f9f5f0;
+}
+html,body{height:100%;margin:0;font-family:system-ui,"Segoe UI",Roboto,Arial;background:var(--bg);}
+#map{position:absolute;inset:0;background:var(--paper-tint);}
+
+/* Sidebar */
+#sidebar{
+  position:absolute;left:12px;top:12px;z-index:10;width:var(--sidebar-w);
+  background:rgba(255,255,255,0.98);border-radius:10px;padding:14px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.10);max-height:calc(100% - 24px);overflow:auto;
+}
+.field{margin:8px 0}
+input[type="text"]{width:100%;padding:9px;border-radius:8px;border:1px solid #e6e6e6}
+button{background:var(--accent);color:#fff;border:none;padding:8px 10px;border-radius:8px;cursor:pointer}
+button.ghost{background:transparent;border:1px solid #e6e6e6;color:#222}
+.small{font-size:13px;padding:6px 8px}
+.row{display:flex;gap:8px}
+
+/* Autosuggest */
+.suggestions{
+  position:absolute;top:40px;left:0;right:0;
+  background:white;border:1px solid #ddd;border-radius:6px;
+  max-height:220px;overflow:auto;z-index:20;
+}
+.suggest-item{padding:8px;cursor:pointer;font-size:13px}
+.suggest-item:hover,.suggest-item.active{background:#f1f5fb}
+</style>
+</head>
+
+<body>
+
+<div id="sidebar">
+  <h2>RVCE Campus Map</h2>
+  <div id="infoPanel" style="
+  display:none;
+  margin-top:8px;
+  padding:8px;
+  border-radius:8px;
+  background:#f1f5fb;
+  font-size:13px;
+">
+  <div id="startInfo"></div>
+  <div id="endInfo" style="margin-top:6px;"></div>
+</div>
+
+  <div class="field row">
+    <button id="findBtn" class="small">Find</button>
+    <button id="clearBtn" class="small ghost">Clear</button>
+  </div>
+
+  <div class="field">
+    <strong>Routing</strong>
+
+    <div class="field">
+      <div>Start</div>
+      <input id="startInput" type="text" autocomplete="off"/>
+      <div id="startSuggestions" class="suggestions" style="display:none"></div>
+    </div>
+
+    <div class="field">
+      <div>End</div>
+      <input id="endInput" type="text" autocomplete="off"/>
+      <div id="endSuggestions" class="suggestions" style="display:none"></div>
+    </div>
+
+    <div class="row">
+      <button id="computeRoute" class="small">Compute</button>
+      <button id="resetRouteBtn" class="small ghost">Reset</button>
+    </div>
+  </div>
+</div>
+<div id="map"></div>
+
+<script>
+/* ================= CONFIG ================= */
+const DEFAULT_CENTER = [77.5008,12.9235];
+const DEFAULT_ZOOM = 17;
+
+/* ================= MAP ================= */
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: {},
+    layers: [
+      {
+        id: 'background',
+        type: 'background',
+        paint: {
+          'background-color': '#ffffff'
+        }
+      }
+    ]
+  },
+  center: DEFAULT_CENTER,
+  zoom: DEFAULT_ZOOM,
+  pitch: 60,
+  bearing: -25,
+  antialias: true
+});
+window.__TOP_VIEW__ = false;
+
+class TopViewControl {
+  onAdd(map) {
+    this.map = map;
+
+    // IMPORTANT: control container
+    this.container = document.createElement("div");
+    this.container.className = "maplibregl-ctrl maplibregl-ctrl-group";
+
+    this.btn = document.createElement("button");
+    this.btn.type = "button";
+    this.btn.title = "Top / 3D View";
+    this.btn.innerHTML = "⬆️";
+
+    this.btn.onclick = () => {
+      window.__TOP_VIEW__ = !window.__TOP_VIEW__;
+
+      if (window.__TOP_VIEW__) {
+        map.easeTo({ pitch: 0, bearing: 0, duration: 500 });
+        this.btn.innerHTML = "🏙️";
+      } else {
+        map.easeTo({
+          pitch: 60,
+          bearing: VIEWS[viewIndex].bearing,
+          duration: 500
+        });
+        this.btn.innerHTML = "⬆️";
+      }
+    };
+
+    this.container.appendChild(this.btn);
+    return this.container;
+  }
+
+  onRemove() {
+    this.container.remove();
+    this.map = undefined;
+  }
+}
+class RotateViewControl {
+  onAdd(map) {
+    this.map = map;
+
+    // SAME control group → vertical stack
+    this.container = document.createElement("div");
+    this.container.className = "maplibregl-ctrl maplibregl-ctrl-group";
+
+    this.btn = document.createElement("button");
+    this.btn.type = "button";
+    this.btn.title = "Rotate View (N / E / S / W)";
+    this.btn.innerHTML = "🧭";
+
+    this.btn.onclick = () => {
+      if (window.__TOP_VIEW__) return;
+
+      viewIndex = (viewIndex + 1) % VIEWS.length;
+      map.easeTo({
+        bearing: VIEWS[viewIndex].bearing,
+        pitch: 60,
+        duration: 500
+      });
+    };
+
+    this.container.appendChild(this.btn);
+    return this.container;
+  }
+
+  onRemove() {
+    this.container.remove();
+    this.map = undefined;
+  }
+}
+const VIEWS = [
+  { name: "North", bearing: 0 },
+  { name: "East",  bearing: 90 },
+  { name: "South", bearing: 180 },
+  { name: "West",  bearing: 270 }
+];
+
+let viewIndex = 0;
+
+function cycleView() {
+  viewIndex = (viewIndex + 1) % VIEWS.length;
+
+  map.easeTo({
+    bearing: VIEWS[viewIndex].bearing,
+    pitch: 60,       // keep your 3D tilt
+    duration: 600
+  });
+}
+// Zoom (+ / -)
+map.addControl(
+  new maplibregl.NavigationControl({
+    showCompass: false,
+    showZoom: true
+  }),
+  "top-right"
+);
+
+// ⬆️ Top View (below + -)
+map.addControl(new TopViewControl(), "top-right");
+
+// 🧭 Rotate View (below Top View)
+map.addControl(new RotateViewControl(), "top-right");
+/* ================= SEARCH DATA ================= */
+const searchItems = [];
+const buildingCentroids = {};
+
+function extractTeachers(text){
+  if(!text) return [];
+  return text.replace(/[()]/g,'')
+    .split(',')
+    .map(t=>t.trim())
+    .filter(t=>t && !/office|lab|room|toilet/i.test(t));
+}
+
+/* ===== Example buildingData (keep yours) ===== */
+const buildingData = [
+  { building: "RVCE VIDYANIKETHAN MAIN GATE", lon: 77.49902895715066, lat: 12.924620219394747 },
+  {
+    building: "Mathematics Department",
+    lon: 77.50140209,
+    lat: 12.92401385,
+    rooms: [
+      { room: "UPS", desc: "UPS Room", floor: 0},
+      { room: "Characterization Lab", desc: "Lab", floor: 0},
+      { room: "Fabrication Lab", desc: "Lab", floor: 0},
+      { room: "101", desc: "HoD (Dr. G Jayalatha)", floor: 1},
+      { room: "102", desc: "HoD Room", floor: 1},
+      { room: "103", desc: "Research Scholars Room", floor: 1},
+      { room: "104", desc: "Class / Office", floor: 1 },
+      { room: "105", desc: "Class / Office", floor: 1},
+      { room: "106", desc: "Class / Office", floor: 1},
+      { room: "107", desc: "Store Room", floor: 1},
+      { room: "111", desc: "Dr. Savithri Shashidhar (Associate Professor)", floor: 1},
+      { room: "112", desc: "Dr. Neeti Ghiya (Associate Professor)", floor: 1},
+      { room: "113", desc: "UPS Room (S. Pavan Kumar)", floor: 1},
+      { room: "204", desc: "Dr. Y Sailaja, Dr. Suma N Manjunath", floor: 2},
+      { room: "205", desc: "Dr. Sowmya M", floor: 2},
+      { room: "206", desc: "Dr. A. Sujatha, Dr. Vidya Patil", floor: 2},
+      { room: "207", desc: "Gents Toilet", floor: 2},
+      { room: "208", desc: "Ladies Toilet", floor: 2},
+      { room: "209", desc: "Dr. Vidya Niranjan", floor: 2},
+      { room: "210", desc: "Dr. C. Nandeesh Kumar, Dr. Prasanna Kumar T, Dr. Hemanthkumar B", floor: 2},
+      { room: "213", desc: "Class / Office", floor: 2 },
+      { room: "310", desc: "Class / Office", floor: 3 },
+      { room: "311", desc: "Dr. Prakash R, Dr. Venugopal K", floor: 3},
+      { room: "309", desc: "Class / Office", floor: 3},
+      { room: "308", desc: "Class / Office", floor: 3},
+      { room: "306", desc: "Class / Office", floor: 3},
+      { room: "305", desc: "Mr. P  Rajashekhar, Dr. Harsh M(Assistant Professor)", floor: 3},
+      { room: "304", desc: "Dr. Ravi K M, Dr. Suman NP(Assistant Professor)", floor: 3}
+    ]
+  },
+
+  {
+    building: "Chemical Department",
+    lon: 77.50003958752856,
+    lat: 12.923242319769882,
+    rooms: [
+      { room: "CH101", desc: "HoD Office" },
+      { room: "CH103", desc: "Process Heat Transfer Lab" },
+      { room: "CH106", desc: "Ladies Toilet" },
+      { room: "CH108", desc: "Faculty Room" },
+      { room: "CH109", desc: "Seminar Hall" },
+      { room: "CH110", desc: "Computer Application Lab" },
+      { room: "CH112", desc: "Faculty" },
+      { room: "CH113", desc: "Gents Toilet" },
+      { room: "CH114", desc: "Particulate Tech Lab" },
+      { room: "CH116", desc: "Staff Room" },
+      { room: "CH118", desc: "Department Office" },
+      { room: "CHE201", desc: "Engg Chem Lab 1 & 2" },
+      { room: "CHE206", desc: "Library" },
+      { room: "CHE210", desc: "Research Lab 2" },
+      { room: "CHE214", desc: "Chemistry Lab 1", floor: 1}
+    ]
+  },
+
+  {
+    building: "Admin Block",
+    lon: 77.49862798,
+    lat: 12.92374548,
+    rooms: [
+      { room: "-", desc: "Principal Office (Dr. K. N. Subramanya)", floor: 0 },
+      { room: "-", desc: "Vice Principal Office (Dr. K. S. Geeta)" },
+      { room: "-", desc: "Dean Academics (Dr. M. V. Renuka Devi)" },
+      { room: "-", desc: "Dean Student Affairs (Dr. B. M. Sagar)" },
+      { room: "-", desc: "Placement & Training Office" },
+      { room: "-", desc: "IQAC Office" },
+      { room: "-", desc: "Examination Hall" },
+      { room: "-", desc: "Controller of Examinations Office" },
+      { room: "-", desc: "Visitors Lounge" }
+    ]
+  },
+
+  {
+    building: "Civil Department",
+    lon: 77.49960797105676,
+    lat: 12.924453062613491,
+    rooms: [
+      { room: "CE110", desc: "Lab" },
+      { room: "CE116", desc: "Toilet" },
+      { room: "CE117", desc: "Toilet" },
+      { room: "CE011", desc: "Store" },
+      { room: "CE005", desc: "Survey Store" },
+      { room: "CE207", desc: "Classroom" },
+      { room: "CE218", desc: "Ladies Room" },
+      { room: "CE220", desc: "Staff Toilet" },
+      { room: "CE223", desc: "PG Computer Center" },
+      { room: "CE307", desc: "Staff Room" },
+      { room: "CE315", desc: "Ladies Toilet" },
+      { room: "CE316", desc: "His Toilet" }
+    ]
+  },
+  {
+    building: "Astra Robotics",
+    lon: 77.50150748,
+    lat: 12.92393775
+  },
+{
+    building: "BT Quadrangle",
+    lon: 77.49864709711517,
+    lat: 12.922601359632521
+  },
+{
+    building: "Electronics and Communication Department",
+    lon: 77.50010485958921,
+    lat: 12.923871295284604
+  }   
+];
+buildingData.forEach((b, i) => {
+
+  const centroid =
+    buildingCentroids[b.building.toLowerCase()] ||
+    [b.lon, b.lat]; // fallback
+
+  // Building entry
+  searchItems.push({
+    id: 'b_' + i,
+    name: b.building,
+    coords: centroid,
+    type: 'building'
+  });
+
+  // Room / faculty entries
+  (b.rooms || []).forEach((r, j) => {
+    searchItems.push({
+      id: `r_${i}_${j}`,
+      name: `${r.room} - ${r.desc}`,
+      coords: centroid,
+      type: 'room',
+      teachers: extractTeachers(r.desc),
+      floor: r.floor ?? null,
+      building: b.building
+    });
+  });
+});
+function updateLocationInfo(startItem, endItem) {
+  const panel = document.getElementById('infoPanel');
+  const startDiv = document.getElementById('startInfo');
+  const endDiv = document.getElementById('endInfo');
+
+  let hasInfo = false;
+
+  // START location info
+  if (startItem && startItem.type === 'room' && startItem.floor != null) {
+    startDiv.innerHTML = `
+      <strong>Start Location</strong><br>
+      Building: ${startItem.building}<br>
+      Floor: ${startItem.floor}
+    `;
+    hasInfo = true;
+  } else {
+    startDiv.innerHTML = '';
+  }
+
+  // END location info
+  if (endItem && endItem.type === 'room' && endItem.floor != null) {
+    endDiv.innerHTML = `
+      <strong>End Location</strong><br>
+      Building: ${endItem.building}<br>
+      Floor: ${endItem.floor}
+    `;
+    hasInfo = true;
+  } else {
+    endDiv.innerHTML = '';
+  }
+
+  panel.style.display = hasInfo ? 'block' : 'none';
+}
+/* ================= AUTOSUGGEST ================= */
+function createSuggestEngine(input, box){
+  input.dataset.selectedId = "";
+
+  input.addEventListener('input',()=>{
+    input.dataset.selectedId = ""; // reset if user types
+    const q=input.value.toLowerCase();
+    if(!q){box.style.display='none';return;}
+
+    const m=searchItems.filter(s=>
+      s.name.toLowerCase().includes(q) ||
+      (s.teachers && s.teachers.join(' ').toLowerCase().includes(q))
+    ).slice(0,20);
+
+    box.innerHTML = m.map(x =>
+  `<div class="suggest-item" data-id="${x.id}">${x.name}</div>`
+).join('');
+
+    box.style.display = m.length ? 'block' : 'none';
+  });
+
+  box.addEventListener('click',e=>{
+    const it = e.target.closest('.suggest-item');
+    if(!it) return;
+
+    const s = searchItems.find(x => x.id === it.dataset.id);
+    if(s){
+      input.value = s.name;
+      input.dataset.selectedId = s.id; // 🔥 VERY IMPORTANT
+      map.easeTo({center:s.coords,zoom:18});
+    }
+    box.style.display='none';
+  });
+}
+/* ================= DOM REFS ================= */
+const searchInput = document.getElementById('searchInput');
+const findBtn = document.getElementById('findBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+const startInput = document.getElementById('startInput');
+const endInput = document.getElementById('endInput');
+
+const startSuggestions = document.getElementById('startSuggestions');
+const endSuggestions = document.getElementById('endSuggestions');
+
+const computeRoute = document.getElementById('computeRoute');
+const resetRouteBtn = document.getElementById('resetRouteBtn');
+createSuggestEngine(startInput,startSuggestions);
+createSuggestEngine(endInput,endSuggestions);
+
+/* ================= GRAPH + ROUTING ================= */
+let graphNodes={}, graphEdges={};
+let graphReady = false;
+let startMarker = null;
+let endMarker = null;
+
+function dijkstra(nodes,edges,s,t){
+  const dist={},prev={},Q=new Set(Object.keys(nodes));
+  Object.keys(nodes).forEach(k=>dist[k]=Infinity);
+  dist[s]=0;
+  while(Q.size){
+    let u=[...Q].reduce((a,b)=>dist[a]<dist[b]?a:b);
+    Q.delete(u);
+    if(u===t) break;
+    (edges[u]||[]).forEach(e=>{
+      const alt=dist[u]+e.w;
+      if(alt<dist[e.to]){dist[e.to]=alt;prev[e.to]=u;}
+    });
+  }
+  const path=[]; let c=t;
+  while(c){path.unshift(c);c=prev[c];}
+  return path;
+}
+function buildGraphFromPaths(geojson) {
+  const nodes = {};
+  const edges = {};
+
+  function nodeId(coord) {
+    return coord[0].toFixed(6) + ',' + coord[1].toFixed(6);
+  }
+
+  function addLine(coords) {
+    for (let i = 0; i < coords.length - 1; i++) {
+      const a = coords[i];
+      const b = coords[i + 1];
+
+      const u = nodeId(a);
+      const v = nodeId(b);
+
+      nodes[u] = { id: u, x: a[0], y: a[1] };
+      nodes[v] = { id: v, x: b[0], y: b[1] };
+
+      const R = 6371000;
+      const toRad = d => d * Math.PI / 180;
+
+      const dLat = toRad(b[1] - a[1]);
+      const dLon = toRad(b[0] - a[0]);
+      const lat1 = toRad(a[1]);
+      const lat2 = toRad(b[1]);
+
+      const d =
+        2 * R * Math.asin(Math.sqrt(
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(lat1) * Math.cos(lat2) *
+          Math.sin(dLon / 2) ** 2
+        ));
+
+      edges[u] = edges[u] || [];
+      edges[v] = edges[v] || [];
+      edges[u].push({ to: v, w: d });
+      edges[v].push({ to: u, w: d });
+    }
+  }
+
+  geojson.features.forEach(f => {
+    if (!f.geometry) return;
+
+    if (f.geometry.type === 'LineString') {
+      addLine(f.geometry.coordinates);
+    }
+
+    if (f.geometry.type === 'MultiLineString') {
+      f.geometry.coordinates.forEach(addLine);
+    }
+  });
+
+  return { nodes, edges };
+}
+const MAX_SNAP_DISTANCE_METERS = 300; // adjust 50–120 if needed
+function nearestNode(lat, lon) {
+  let best = null;
+  let bestDist = Infinity;
+
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+
+  for (const id in graphNodes) {
+    const n = graphNodes[id];
+
+    const dLat = toRad(n.y - lat);
+    const dLon = toRad(n.x - lon);
+
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat)) *
+      Math.cos(toRad(n.y)) *
+      Math.sin(dLon / 2) ** 2;
+
+    const d = 2 * R * Math.asin(Math.sqrt(a));
+
+    if (d < bestDist) {
+      bestDist = d;
+      best = id;
+    }
+  }
+
+  // IMPORTANT PART
+  if (bestDist > MAX_SNAP_DISTANCE_METERS) {
+  console.warn(
+    "Snapping far from path:",
+    Math.round(bestDist), "meters"
+  );
+}
+
+  return best;
+}
+function addOrMoveMarker(existingMarker, lngLat, color) {
+  if (existingMarker) {
+    existingMarker.setLngLat(lngLat);
+    return existingMarker;
+  }
+  return new maplibregl.Marker({ color })
+    .setLngLat(lngLat)
+    .addTo(map);
+}
+// Map: building name -> [lon, lat] from buildings.json
+/* ================= LOAD DATA ================= */
+map.on('load',async()=>{
+  const buildings=await fetch('data/buildings.json').then(r=>r.json());
+  // Build centroid lookup from buildings.json
+buildings.features.forEach(f => {
+  const props = f.properties || {};
+  const name =
+    props.name ||
+    props.building;
+
+  if (!name) return;
+
+  let lngLat;
+
+  if (f.geometry.type === "Polygon") {
+    lngLat = f.geometry.coordinates[0][0];
+  } else if (f.geometry.type === "MultiPolygon") {
+    lngLat = f.geometry.coordinates[0][0][0];
+  }
+
+  if (lngLat) {
+    buildingCentroids[name.toLowerCase()] = lngLat;
+  }
+});
+// ---- ADD buildings.json entries to autosuggest ----
+const existingBuildingNames = new Set(
+  searchItems
+    .filter(s => s.type === 'building')
+    .map(s => s.name.toLowerCase())
+);
+
+buildings.features.forEach((f, idx) => {
+  const props = f.properties || {};
+  const name = props.name || props.building;
+  if (!name) return;
+
+  // Skip if already present via buildingData
+  if (existingBuildingNames.has(name.toLowerCase())) return;
+
+  let coords;
+  if (f.geometry.type === "Polygon") {
+    coords = f.geometry.coordinates[0][0];
+  } else if (f.geometry.type === "MultiPolygon") {
+    coords = f.geometry.coordinates[0][0][0];
+  } else {
+    return;
+  }
+
+  searchItems.push({
+    id: `b_json_${idx}`,
+    name: name,
+    coords: coords,
+    type: 'building'
+  });
+});
+  map.addSource('buildings',{type:'geojson',data:buildings});
+  map.addLayer({
+  id: 'b3d',
+  type: 'fill-extrusion',
+  source: 'buildings',
+  paint: {
+    'fill-extrusion-color': '#e6dfd2',
+
+    // Works for Polygon + MultiPolygon
+    // Priority:
+    // 1. height (meters)
+    // 2. building:levels × 3
+    // 3. default = 10m
+    'fill-extrusion-height': [
+      'case',
+
+      // if "height" exists
+      ['has', 'height'],
+      ['to-number', ['get', 'height']],
+
+      // else if "building:levels" exists
+      ['has', 'building:levels'],
+      ['*', ['to-number', ['get', 'building:levels']], 3],
+
+      // else default height
+      10
+    ],
+
+    'fill-extrusion-base': 0,
+    'fill-extrusion-opacity': 0.95
+  }
+});
+// Click on building → show building name
+map.on('click', 'b3d', (e) => {
+  const feature = e.features && e.features[0];
+  if (!feature) return;
+
+  const name =
+    feature.properties.name ||
+    feature.properties.building ||
+    "Unnamed Building";
+
+  new maplibregl.Popup({ closeOnClick: true })
+    .setLngLat(e.lngLat)
+    .setHTML(`<strong>${name}</strong>`)
+    .addTo(map);
+});
+  const paths=await fetch('data/paths.json').then(r=>r.json());
+  map.addSource('paths',{type:'geojson',data:paths});
+  map.addLayer({
+    id:'paths',type:'line',source:'paths',
+    paint:{'line-color':'#9aa28f','line-width':6}
+  });
+
+  map.addSource('route',{type:'geojson',data:{type:'FeatureCollection',features:[]}});
+  map.addLayer({
+    id:'route',type:'line',source:'route',
+    paint:{'line-color':'#d83b3b','line-width':6}
+  });
+const g = buildGraphFromPaths(paths);
+graphNodes = g.nodes;
+graphEdges = g.edges;
+graphReady = true;
+console.log(
+  'Graph ready:',
+  Object.keys(graphNodes).length, 'nodes',
+  Object.keys(graphEdges).length, 'edges'
+);
+});
+
+/* ================= ROUTE UI ================= */
+computeRoute.onclick = () => {
+
+  if (!graphReady) {
+    alert("Path network is still loading. Please wait a moment.");
+    return;
+  }
+
+  function getSelectedItem(input){
+    if (!input.dataset.selectedId) return null;
+    return searchItems.find(s => s.id === input.dataset.selectedId);
+  }
+
+  const startItem = getSelectedItem(startInput);
+  const endItem   = getSelectedItem(endInput);
+  updateLocationInfo(startItem, endItem);
+
+  if (!startItem || !endItem) {
+    alert("Please select start and end ONLY from autosuggestions");
+    return;
+  }
+
+  const startNode = nearestNode(
+    startItem.coords[1],
+    startItem.coords[0]
+  );
+  const endNode = nearestNode(
+    endItem.coords[1],
+    endItem.coords[0]
+  );
+  // 🟢 Start marker (green)
+startMarker = addOrMoveMarker(
+  startMarker,
+  [startItem.coords[0], startItem.coords[1]],
+  "#2ecc71"
+);
+
+// 🔴 End marker (red)
+endMarker = addOrMoveMarker(
+  endMarker,
+  [endItem.coords[0], endItem.coords[1]],
+  "#e74c3c"
+);
+
+  if (!startNode || !endNode) {
+    alert("Could not snap to walking paths");
+    return;
+  }
+
+  const path = dijkstra(
+    graphNodes,
+    graphEdges,
+    startNode,
+    endNode
+  );
+
+  if (!path || path.length < 2) {
+    alert("No route found");
+    return;
+  }
+
+  const routeGeo = {
+    type: "FeatureCollection",
+    features: [{
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: path.map(id => [
+          graphNodes[id].x,
+          graphNodes[id].y
+        ])
+      }
+    }]
+  };
+
+  map.getSource("route").setData(routeGeo);
+};
+resetRouteBtn.onclick = () => {
+  map.getSource('route').setData({
+    type: 'FeatureCollection',
+    features: []
+  });
+
+  if (startMarker) {
+    startMarker.remove();
+    startMarker = null;
+  }
+  if (endMarker) {
+    endMarker.remove();
+    endMarker = null;
+  }
+};
+</script>
+
+</body>
+</html>

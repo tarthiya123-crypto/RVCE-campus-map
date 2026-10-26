@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>RVCE Campus Navigator — 3D Map & Smart Routing</title>
+  <meta name="description" content="Interactive 3D illustrated campus map and multi-algorithm navigation system for R.V. College of Engineering (RVCE), Bengaluru." />
+
+  <!-- PWA Meta Tags -->
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#1e3a8a" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="RVCE Map" />
+
+  <!-- Preconnect & Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+
+  <!-- MapLibre GL CSS & JS -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+
+  <!-- Application Stylesheet -->
+  <link rel="stylesheet" href="css/style.css" />
+
+  <style>
+    /* Gamified Canvas Container */
+    #gamifiedMapContainer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background: #0a0f23;
+      overflow: hidden;
+    }
+
+    /* Disable the old illustrated-map style for canvas mode */
+    .map-viewport { background: transparent; }
+  </style>
+</head>
+
+<body>
+  <div id="appRoot">
+    <!-- ================= MAP VIEWPORTS ================= -->
+    <div class="map-canvas-container">
+      <!-- Mode 1: Gamified Isometric Canvas Map (from real coordinates) -->
+      <div id="gamifiedMapContainer" class="map-view"></div>
+
+      <!-- Mode 2: 3D Vector Extruded Map (MapLibre GL) -->
+      <div id="vectorMapContainer" class="map-view hidden"></div>
+    </div>
+
+    <!-- ================= FLOATING NAVIGATION SIDEBAR ================= -->
+    <aside class="sidebar-panel" id="sidebarPanel">
+      <!-- Header -->
+      <div class="panel-header">
+        <div class="college-logo-badge">🏛️</div>
+        <div class="college-title">
+          <h1>RVCE Navigator</h1>
+          <p>R.V. College of Engineering • Bengaluru</p>
+        </div>
+      </div>
+
+      <!-- Panel Body -->
+      <div class="panel-body">
+        <!-- Search Input -->
+        <div class="search-container">
+          <div class="search-input-box">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="globalSearchInput" placeholder="Search departments, labs, faculty, rooms..." autocomplete="off" />
+            <button class="search-clear-btn" id="searchClearBtn" style="display:none;">✕</button>
+          </div>
+          <div class="search-suggestions-dropdown" id="searchSuggestionsDropdown"></div>
+        </div>
+
+        <!-- Category Filter Chips -->
+        <div class="category-chips-scroll" id="categoryChipsContainer"></div>
+
+        <!-- Route Planner Card -->
+        <div class="routing-card">
+          <div class="routing-title">
+            <span>Route Finder</span>
+            <span style="font-size:11px;color:#64748b;font-weight:600;">Campus Walking Graph</span>
+          </div>
+
+          <div class="route-inputs-wrapper">
+            <div class="route-inputs-fields">
+              <!-- Start Location Field -->
+              <div class="route-field">
+                <span class="field-dot start-dot"></span>
+                <input type="text" id="startLocationInput" placeholder="Choose starting location..." autocomplete="off" />
+              </div>
+
+              <!-- Destination Location Field -->
+              <div class="route-field">
+                <span class="field-dot end-dot"></span>
+                <input type="text" id="destLocationInput" placeholder="Choose destination..." autocomplete="off" />
+              </div>
+            </div>
+
+            <!-- Swap Button -->
+            <button class="swap-btn" id="swapRouteBtn" title="Swap Start and Destination">⇅</button>
+          </div>
+
+          <!-- Algorithm Selector -->
+          <div class="algorithm-selector-box">
+            <label for="algorithmSelect">Routing Algorithm</label>
+            <select id="algorithmSelect" class="algo-select">
+              <option value="dijkstra" selected>Dijkstra's Algorithm (Shortest Path)</option>
+              <option value="astar">A* Search (Heuristic Guided)</option>
+              <option value="bfs">BFS (Fewest Intersections)</option>
+              <option value="accessible">Accessible Route (Wheelchair Friendly)</option>
+            </select>
+          </div>
+
+          <!-- Route Action Buttons -->
+          <div class="route-actions-row">
+            <button class="btn-primary" id="findRouteBtn">
+              <span>🚀</span> Find Route
+            </button>
+            <button class="btn-ghost" id="clearRouteBtn">Reset</button>
+          </div>
+        </div>
+
+        <!-- Live Navigation Summary Card (Revealed on route computed) -->
+        <div class="navigation-summary-card" id="navSummaryCard">
+          <div class="nav-stats-grid">
+            <div class="stat-item">
+              <div class="stat-value" id="statDistance">0 m</div>
+              <div class="stat-label">Distance</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statTime">0s</div>
+              <div class="stat-label">Walk Time</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statSteps">0</div>
+              <div class="stat-label">Steps</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value" id="statCalories">0 kcal</div>
+              <div class="stat-label">Burned</div>
+            </div>
+          </div>
+
+          <!-- Simulation Bar -->
+          <div class="sim-controls-bar">
+            <button class="sim-play-btn" id="simPlayBtn">
+              <span>▶</span> Simulate Walk
+            </button>
+            <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;">
+              <span>Speed:</span>
+              <select id="simSpeedSelect" class="sim-speed-select">
+                <option value="1" selected>1x</option>
+                <option value="2">2x</option>
+                <option value="4">4x</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Turn by Turn Directions List -->
+          <div class="directions-list" id="directionsList"></div>
+        </div>
+
+        <!-- Quick Access Places -->
+        <div class="quick-places-box">
+          <div class="quick-places-title">Popular Destinations</div>
+          <div class="quick-places-grid" id="quickPlacesGrid"></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Sidebar Toggle Pill -->
+    <button class="sidebar-toggle-btn" id="sidebarToggleBtn" title="Toggle Sidebar">⬅️</button>
+
+    <!-- ================= FLOATING MAP CONTROLS ================= -->
+    <div class="map-floating-controls">
+      <!-- Mode Switcher -->
+      <div class="mode-switcher-pill">
+        <button class="mode-pill-btn active" data-mode="gamified">
+          <span>🎮</span> Gamified Map
+        </button>
+        <button class="mode-pill-btn" data-mode="vector">
+          <span>🏙️</span> 3D Vector
+        </button>
+      </div>
+
+      <!-- Compass Bearing Widget -->
+      <div id="compassContainer"></div>
+
+      <!-- Action Stack -->
+      <div class="controls-stack">
+        <button class="control-btn" id="ctrlZoomIn" title="Zoom In">➕</button>
+        <button class="control-btn" id="ctrlZoomOut" title="Zoom Out">➖</button>
+        <button class="control-btn" id="ctrlRotate" title="Rotate View (N / E / S / W)">🧭</button>
+        <button class="control-btn" id="ctrlTopView" title="Top / 3D Isometric View">⬆️</button>
+        <button class="control-btn" id="ctrlReset" title="Center Campus">🔄</button>
+        <button class="control-btn" id="ctrlVoice" title="Toggle Voice Navigation">🔊</button>
+      </div>
+    </div>
+
+    <!-- ================= BUILDING INSPECTION MODAL ================= -->
+    <div class="building-detail-modal" id="buildingModal">
+      <div class="modal-header">
+        <div class="modal-title">
+          <h3 id="modalTitle">Building Title</h3>
+          <p id="modalCategory">Academic Department</p>
+        </div>
+        <button class="modal-close-btn" id="modalCloseBtn">✕</button>
+      </div>
+      <div class="modal-desc" id="modalDesc">Building description here.</div>
+      <div class="modal-rooms-list" id="modalRoomsList"></div>
+      <div class="modal-actions">
+        <button class="btn-primary" id="modalStartBtn" style="background:#10b981;">Route From Here</button>
+        <button class="btn-primary" id="modalDestBtn" style="background:#ef4444;">Route To Here</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/campus-data.js"></script>
+  <script src="js/algorithms.js"></script>
+  <script src="js/voice-nav.js"></script>
+  <script src="js/gamified-map.js"></script>
+  <script src="js/vector-map.js"></script>
+  <script src="js/app.js"></script>
+
+  <!-- PWA Service Worker Registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(reg => console.log('[PWA] SW registered:', reg.scope))
+          .catch(err => console.warn('[PWA] SW failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
